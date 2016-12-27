@@ -9,8 +9,7 @@ from Crypto.Cipher import AES
 
 
 PROMPT = '> '
-WII_COMMON_KEY = '' # ...
-WII_COMMON_KEY = str.encode(WII_COMMON_KEY)
+WII_COMMON_KEY = '' # Add it
 CLUSTER_SIZE = 0x8000
 
 def stick(content_folder, hif_file):
@@ -64,25 +63,25 @@ def gen_padding(file_obj, nbytes):
     padding = bytearray.fromhex('00' * nbytes)
     file_obj.write(padding)
 
-def write_cluster(infile_obj, outfile_obj, ncluster, data_offset, key):
-    """Encrypts clusters and save them"""
+def read_cluster(data_offset, partition_offset,  infile_obj, outfile_obj, key):
+    """Decrypts clusters and save them"""
 
-    while ncluster >= 1:
-        #print(str(ncluster) + ' clusters remaining')
-        outfile_obj.write(infile_obj.read(0x3D0))
-        initial_vector = infile_obj.read(0x10)
-        outfile_obj.write(initial_vector)
-        outfile_obj.write(infile_obj.read(0x20))
-        sector = infile_obj.read(CLUSTER_SIZE-0x400)
+    size_left = os.fstat(infile_obj.fileno()).st_size - partition_offset
+    data_offset = partition_offset + data_offset
+    infile_obj.seek(data_offset)
+
+    while size_left >= CLUSTER_SIZE:
+        data_enc = infile_obj.read(CLUSTER_SIZE)
+        initial_vector = data_enc[0x3D0:0x3E0]
         aes = AES.new(key, AES.MODE_CBC, initial_vector)
-        sector = aes.encrypt(sector)
-        outfile_obj.write(sector)
-        ncluster -= 1
+        outfile_obj.write(aes.encrypt(data_enc[0x400:]))
+        size_left -= CLUSTER_SIZE
 
 def make_iso(in_file, out_file):
     """ Create a valid Wii iso from the decrypted nfs file"""
 
-    base_offset = 0xF800000
+    wiiu_part_offset = 0x18000
+    wii_part_offset = 0xF800000
 
     with open(in_file, 'rb') as infile:
         with open(out_file, 'wb') as outfile:
@@ -125,9 +124,9 @@ def make_iso(in_file, out_file):
 
             # Padding up to the unique partition
             print('Padding up to the unique partition, hang on...')
-            gen_padding(outfile, base_offset - outfile.tell())
+            gen_padding(outfile, wii_part_offset - outfile.tell())
 
-            infile.seek(0x18000)
+            infile.seek(wiiu_part_offset)
 
             # Writing down partition up to the encrypted title key
             print('Writing down the partition up to the encrypted title key')
@@ -158,18 +157,22 @@ def make_iso(in_file, out_file):
             data_offset = infile.read(0x4)
             outfile.write(data_offset)
             data_offset = int(binascii.hexlify(data_offset), 16)
-            data_offset += base_offset
 
             data_size = infile.read(0x4)
             outfile.write(data_size)
             data_size = int(binascii.hexlify(data_size), 16)
 
+            # Writing down tmd, padding and cert
+            print('Writing down tmd, padding and cert')
+            outfile.write(infile.read(0xC20))
+
             initial_vector = title_id[:8] + str.encode('\x00' * 8)
             title_decryptor = AES.new(WII_COMMON_KEY, AES.MODE_CBC, initial_vector)
             title_key = title_decryptor.decrypt(enc_title_key)
 
-            ncluster = data_size / CLUSTER_SIZE
-            write_cluster(infile, outfile, int(ncluster), data_offset, title_key)
+            # Encrypting clusters
+            print('Encrypting clusters')
+            read_cluster(data_offset, wiiu_part_offset, infile, outfile, title_key)
 
             outfile.close()
         infile.close()
@@ -190,13 +193,13 @@ def routine(inputdir, outputdir):
     except FileNotFoundError:
         print('htk.bin missing')
     key = htk_obj.read()
-
+    """
     # Reassembles nfs file
     stick(content_folder, hif_file)
 
     # Decrypts iso
     decrypt_nfs(key, hif_file, 'hif.nfs.dec')
-
+    """
     # Makes valid Wii iso
     make_iso(dec_file, iso_file)
 
